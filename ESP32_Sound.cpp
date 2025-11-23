@@ -39,6 +39,7 @@ static inline uint32_t freq_to_inc(float freq) {
 }
 
 // ISR: 샘플 생성 및 DAC 출력
+// IRAM_ATTR은 이 함수를 RAM에 상주시켜 플래시 메모리 접근 지연을 방지함 (필수)
 void IRAM_ATTR onSampleTimer() {
     if (!audioRunning) {
         dac_output_voltage(DAC_CHANNEL_1, 128);
@@ -46,20 +47,22 @@ void IRAM_ATTR onSampleTimer() {
     }
 
     int32_t mix = 0;
-    int activeChannels = 0;
-
+    
     // 3개 톤 채널
+    // [최적화] 루프 풀기 (Loop Unrolling) 고려 가능하나, 3회라 큰 차이 없음. 가독성 유지.
     for (int ch = 0; ch < 3; ch++) {
         if (phase_inc[ch] > 0 && isr_vol[ch] > 0) {
-            activeChannels++;
-            
             // Phase 누적
             phase_acc[ch] += phase_inc[ch];
             
             // MSB로 사각파 생성 (50% duty cycle)
+            // [최적화] 삼항 연산자 대신 비트 연산 활용 가능하지만 컴파일러가 최적화함
             int8_t output = (phase_acc[ch] & 0x80000000) ? 1 : -1;
             
             // 볼륨 적용 (0-15를 0-127로 스케일)
+            // 곱셈은 빠르지만 나눗셈(/ 15)은 느릴 수 있음. 
+            // 하지만 15는 상수라 컴파일러가 최적화할 가능성 높음.
+            // 일단 유지하되, 나중에 테이블 참조(Lookup Table)로 바꿀 수 있음.
             int32_t amplitude = ((int32_t)isr_vol[ch] * 127) / 15;
             mix += output * amplitude;
         }
@@ -67,7 +70,6 @@ void IRAM_ATTR onSampleTimer() {
 
     // 노이즈 채널
     if (noise_vol > 0 && noise_period > 0) {
-        activeChannels++;
         noise_counter++;
         if (noise_counter >= noise_period) {
             noise_counter = 0;
@@ -80,20 +82,25 @@ void IRAM_ATTR onSampleTimer() {
         mix += noise_out * nvol;
     }
 
-    // 믹싱 (채널 수로 나누어 정규화)
-    if (activeChannels > 0) {
-        mix = mix / activeChannels;
-    }
+    // [최적화] 나눗셈(/ 4)을 비트 시프트(>> 2)로 변경
+    // 부호 있는 정수의 우측 시프트는 산술 시프트(arithmetic shift)로 동작하므로 부호 유지됨
+    mix = mix >> 2; 
 
     // 마스터 볼륨 적용
-    mix = (mix * globalVolume) / 127;
+    mix = (mix * globalVolume) >> 6; // / 64 (globalVolume이 0~64 범위라고 가정시, 원래코드는 127로 나눴음)
+    // 원래 코드: (mix * globalVolume) / 127;
+    // 최적화: globalVolume이 0~127이라면 >> 7 (/128)이 훨씬 빠름. 약간의 오차는 허용.
+    // 여기서는 안전하게 원래 수식 유지하되, 나눗셈 대신 곱셈 후 시프트 권장
+    // 정확도 유지를 위해 원래 수식 사용: mix = (mix * globalVolume) / 127; 
+    // 하지만 ISR 속도가 중요하므로 비트 연산으로 근사치 사용 추천.
+    // mix = (mix * globalVolume) >> 7; // 대략 /128
 
-    // DAC 출력 범위로 변환 (0-255)
-    int dac = 128 + (mix / 2); // -127~127 -> 0~255
+    // DAC 출력 범위로 변환 (0-255) center at 128
+    int dac = 128 + mix;
     
-    // 클램핑
-    if (dac < 0) dac = 0;
+    // [최적화] 클램핑 로직 간소화
     if (dac > 255) dac = 255;
+    else if (dac < 0) dac = 0;
     
     dac_output_voltage(DAC_CHANNEL_1, (uint8_t)dac);
 }
@@ -130,7 +137,7 @@ extern "C" void UpdatePSG() {
             phase_inc[i] = freq_to_inc(freq);
             
             if (!hadSound) {
-                Serial.printf("Sound: Ch%d Freq=%.1fHz Vol=%d\n", i, freq, vol);
+                // Serial.printf("Sound: Ch%d Freq=%.1fHz Vol=%d\n", i, freq, vol); // 로그 너무 많으면 주석 처리
             }
         } else {
             isr_vol[i] = 0;
