@@ -10,9 +10,13 @@ extern "C" {
   #define _ARDUINO_H_
   #endif
   #include "MSX.h"
+  
+  // MSX.c에서 호출하는 함수 연결
+  void SetColor(byte N, byte R, byte G, byte B);
 }
 #include "config.h"
 
+// [중요] VGA16Controller 유지
 extern fabgl::VGA16Controller VGAController;
 extern fabgl::PS2Controller PS2Controller;
 extern fabgl::Canvas *Canvas;
@@ -21,44 +25,34 @@ extern fabgl::Canvas *Canvas;
 fabgl::Bitmap *msxScreen = nullptr;
 uint8_t *XBuf = NULL;
 
-
-//extern "C" void PlayAllSound(int uSec);
-
-// VGA 타입 체크
 static fabgl::VGA16Controller* vga16 = nullptr;
 
-// MSX 컬러 테이블 (BGR 하드웨어 보정: R과 B를 교체하여 정의)
-// MSX 컬러 테이블 (올바른 RGB 값)
-fabgl::RGB888 msxColor(uint8_t c) {
-  static const fabgl::RGB888 table[16] = {
-    {0,0,0},         // 0: Black
-    {0,0,0},         // 1: Black
-    {73,184,62},     // 2: Green (B,G,R 순서로 바꿈)
-    {125,208,116},   // 3: Light Green
-    {224,85,89},     // 4: Blue (실제로는 Red처럼 보이면 순서 문제)
-    {241,118,128},   // 5: Light Blue
-    {81,94,185},     // 6: Red (실제로는 Blue처럼 보이면 순서 문제)
-    {239,219,101},   // 7: Cyan
-    {89,101,219},    // 8: Red
-    {125,137,255},   // 9: Light Red
-    {94,195,204},    // 10: Yellow
-    {135,208,222},   // 11: Light Yellow
-    {65,162,58},     // 12: Dark Green
-    {181,102,183},   // 13: Magenta
-    {204,204,204},   // 14: Gray
-    {255,255,255}    // 15: White
-  };
-  return table[c & 0x0F];
+// === 색상 보정 설정 (정상 작동 확인됨) ===
+#define COLOR_MAP_RGB  // 변환 없음 (표준 RGB 배열 - 빨간색/녹색/파란색 정상)
+
+fabgl::RGB888 convertColor(byte R, byte G, byte B) {
+  fabgl::RGB888 color;
+  
+  #if defined(COLOR_MAP_BGR)
+    color.R = B; color.G = G; color.B = R;
+  #elif defined(COLOR_MAP_RGB)
+    color.R = R; color.G = G; color.B = B;
+  #elif defined(COLOR_MAP_RBG)
+    color.R = R; color.G = B; color.B = G; 
+  #elif defined(COLOR_MAP_GRB)
+    color.R = G; color.G = R; color.B = B;
+  #else 
+    color.R = R; color.G = G; color.B = B;
+  #endif
+  
+  return color;
 }
 
-
-// 키보드 매핑 매크로
+// 키보드 매핑 매크로 (MSX는 Active Low 방식)
 #define PRESS(r, b) KeyState[r] &= ~(b)
 #define RELEASE(r, b) KeyState[r] |= (b)
 
-// FabGL 키를 MSX 키 매트릭스로 변환
-// FabGL 키를 MSX 키 매트릭스로 변환 (수정 버전)
-// MSX 키보드 매트릭스: http://map.grauw.nl/resources/msx_io_ports.php#ppi
+// [복구] 원본 파일의 ProcessKey 함수 (오타 수정 및 전체 매핑 복원)
 void ProcessKey(fabgl::VirtualKey vk, bool down) {
   if (down) {
     switch(vk) {
@@ -294,7 +288,7 @@ void ProcessKey(fabgl::VirtualKey vk, bool down) {
   }
 }
 
-// 키보드 업데이트 함수
+// [복구] 키보드 업데이트 함수
 void UpdateMSXKeyboard() {
   fabgl::Keyboard *kb = PS2Controller.keyboard();
   if(!kb) return;
@@ -306,60 +300,39 @@ void UpdateMSXKeyboard() {
   }
 }
 
-
-
-
-
-
-
-
-
-// 팔레트 테스트 함수 (setup에서 호출)
-void TestPalette() {
-  Serial.println("\n=== MSX Color Palette Test ===");
-  for (int i = 0; i < 16; i++) {
-    fabgl::RGB888 color = msxColor(i);
-    Serial.print("Color ");
-    Serial.print(i);
-    Serial.print(": R=");
-    Serial.print(color.R);
-    Serial.print(" G=");
-    Serial.print(color.G);
-    Serial.print(" B=");
-    Serial.println(color.B);
-    
-    // 실제로 설정되어 있는지 확인
-    if(vga16) {
-      vga16->setPaletteItem(i, color);
-    }
-  }
-  Serial.println("Palette test completed.");
+// MSX 초기 색상 테이블 (부팅 시 사용)
+fabgl::RGB888 msxColor(uint8_t c) {
+  // MSX 표준 RGB 테이블
+  static const uint8_t stdPal[16][3] = {
+    {0,0,0}, {0,0,0}, {32,192,32}, {96,224,96},
+    {32,32,224}, {64,96,224}, {160,32,32}, {64,192,224},
+    {224,32,32}, {224,96,96}, {192,192,32}, {192,192,128},
+    {32,128,32}, {192,64,160}, {160,160,160}, {224,224,224}
+  };
+  
+  uint8_t idx = c & 0x0F;
+  return convertColor(stdPal[idx][0], stdPal[idx][1], stdPal[idx][2]);
 }
 
-
-
-//=============================================================================
-// fMSX Driver Implementation
-//=============================================================================
 int InitMachine(void) {
   Serial.println("InitMachine: Starting...");
-
-  // VGA16 컨트롤러 확인 및 팔레트 설정
+  
+  // 객체 연결 및 포인터 설정
   vga16 = &VGAController;
-  if(vga16) {
-    Serial.println("=== Setting Initial Palette in InitMachine ===");
-    for(int i = 0; i < 16; i++) {
-      fabgl::RGB888 color = msxColor(i);
-      vga16->setPaletteItem(i, color);
-      Serial.printf("InitMachine: Palette[%d] = R=%d G=%d B=%d\n", 
-                    i, color.R, color.G, color.B);
-    }
-    Serial.println("Initial palette set in InitMachine");
-  } else {
+
+  if(!vga16) {
     Serial.println("ERROR: VGA16Controller not available!");
     return 0;
   }
+  
+  // 초기 팔레트 설정 (부팅 직후 화면 색상)
+  if(vga16) {
+    for(int i = 0; i < 16; i++) {
+      vga16->setPaletteItem(i, msxColor(i));
+    }
+  }
 
+  // 화면 버퍼 할당
   size_t bufSize = MSX_WIDTH * MSX_HEIGHT;
   XBuf = (uint8_t*)ps_malloc(bufSize);
   if(!XBuf) {
@@ -367,9 +340,7 @@ int InitMachine(void) {
     return 0;
   }
   memset(XBuf, 0, bufSize);
-  Serial.printf("XBuf allocated: %d bytes at %p\n", bufSize, XBuf);
-
-  // Native 포맷으로 비트맵 생성
+  
   msxScreen = new fabgl::Bitmap(MSX_WIDTH, MSX_HEIGHT, XBuf, 
                                  fabgl::PixelFormat::Native, false);
   if(!msxScreen) {
@@ -388,43 +359,23 @@ void TrashMachine(void) {
   if(XBuf) { free(XBuf); XBuf = NULL; }
 }
 
-// SetColor: VGA16Controller용
-
-void SetColor(byte N, byte R, byte G, byte B) {
+extern "C" void SetColor(byte N, byte R, byte G, byte B) {
   if(N >= 16) return;
   
-  if(!vga16) {
-    vga16 = &VGAController;
-    Serial.println("SetColor: Initializing vga16 pointer");
-  }
+  if(!vga16) vga16 = &VGAController;
+  if(!vga16) return;
   
-  if(vga16) {
-    fabgl::RGB888 color;
-    color.R = R;
-    color.G = G;
-    color.B = B;
-    vga16->setPaletteItem(N, color);
-    
-    // 중요한 색상 변경만 로그
-    if(N <= 15) {
-      Serial.printf("SetColor[%d]: R=%d G=%d B=%d\n", N, R, G, B);
-    }
-  } else {
-    Serial.println("ERROR: SetColor called but vga16 is NULL!");
-  }
+  // 변환된 색상 적용
+  fabgl::RGB888 color = convertColor(R, G, B);
+  vga16->setPaletteItem(N, color);
 }
-
-
-
 
 void RefreshScreen(void) {
   if(Canvas && msxScreen) {
     Canvas->drawBitmap(VGA_OFFSET_X, VGA_OFFSET_Y, msxScreen);
   }
-  // UpdatePSG는 이미 PlayAllSound에서 호출되므로 여기서는 불필요
 }
 
-// 스프라이트 그리기 함수
 void DrawSprites(byte Y, byte *LineBuffer) {
   if (SpritesOFF) return;
 
@@ -461,7 +412,6 @@ void DrawSprites(byte Y, byte *LineBuffer) {
         }
         PatLine <<= 1;
       }
-
       if (Size == 16) {
         PatLine = SprGen[PatIdx * 8 + Diff + 16];
         for (int p = 0; p < 8; p++) {
@@ -477,122 +427,64 @@ void DrawSprites(byte Y, byte *LineBuffer) {
   }
 }
 
-// SCREEN 0 (Text 40x24) 구현 - BASIC 모드용
 void RefreshLine0(byte Y) {
   if(!XBuf || Y >= MSX_HEIGHT) return;
-  
   byte *P = XBuf + Y * MSX_WIDTH;
-  
-  // Text Color & Background Color (VDP Reg 7)
   byte BG = VDP[7] & 0x0F;
   byte FG = VDP[7] >> 4;
   
-  // 정상값 확인: BG=4 (파란색), FG=15 (흰색)
-  // 만약 VDP[7]이 이상하면 강제 수정
-  if (BG != 4 || FG != 15) {
-    BG = 4;   // Dark Blue
-    FG = 15;  // White
-  }
-
-  // Screen 0은 폭이 240픽셀이므로 좌우 8픽셀씩 여백이 생김
-  memset(P, BG, 8); // 좌측 여백
+  memset(P, BG, 8); 
   P += 8;
-
-  int Row = (Y >> 3) * 40; // 40 chars per line
+  int Row = (Y >> 3) * 40; 
   int Line = Y & 7;
-
   for (int X = 0; X < 40; X++) {
     int CharCode = ChrTab[Row + X];
     byte Pattern = ChrGen[CharCode * 8 + Line];
-
-    // 텍스트 모드는 6픽셀 너비 (상위 6비트 사용)
     for (int i = 0; i < 6; i++) {
       *P++ = (Pattern & 0x80) ? FG : BG;
       Pattern <<= 1;
     }
   }
-
-  memset(P, BG, 8); // 우측 여백
+  memset(P, BG, 8); 
 }
 
-// SCREEN 1 (Text 32x24) 구현
 void RefreshLine1(byte Y) {
   if(!XBuf || Y >= MSX_HEIGHT) return;
-  
   byte *P = XBuf + Y * MSX_WIDTH;
   int Row = (Y >> 3) * 32;
   int Line = Y & 7;
   byte BackdropColor = VDP[7] & 0x0F;
-  
-  // 디버깅
-  static bool colorDebug = false;
-  if (!colorDebug && Y == 8) {
-    Serial.printf("RefreshLine1 Y=%d: Row=%d, BackdropColor=%d\n", Y, Row, BackdropColor);
-    
-    // 첫 5개 문자 정보 출력
-    for(int i = 0; i < 5; i++) {
-      int CharCode = ChrTab[Row + i];
-      byte Color = ColTab[CharCode >> 3];
-      Serial.printf("  Char[%d]: Code=%d(0x%02X), ColorTable=0x%02X, FG=%d, BG=%d\n", 
-                    i, CharCode, CharCode, Color, Color >> 4, Color & 0x0F);
-    }
-    colorDebug = true;
-  }
-
   for (int X = 0; X < 32; X++) {
     int CharCode = ChrTab[Row + X];
     byte Pattern = ChrGen[CharCode * 8 + Line];
-    byte Color = ColTab[CharCode >> 3];  // 8문자당 1바이트
-
+    byte Color = ColTab[CharCode >> 3]; 
     byte FG = Color >> 4;
     byte BG = Color & 0x0F;
-    
-    // 투명색(0) 처리
     if(FG == 0) FG = BackdropColor;
     if(BG == 0) BG = BackdropColor;
-
-    // 8픽셀 그리기
     for(int i = 0; i < 8; i++) {
       *P++ = (Pattern & 0x80) ? FG : BG;
       Pattern <<= 1;
     }
   }
-  
   DrawSprites(Y, XBuf + Y * MSX_WIDTH);
 }
 
-// SCREEN 2 (Graphic 2) 구현 - 게임용
 void RefreshLine2(byte Y) {
   if(!XBuf || Y >= MSX_HEIGHT) return;
-  
   byte *P = XBuf + Y * MSX_WIDTH;
-  
   int Zone = Y / 64; 
   int Row  = (Y >> 3) * 32; 
   int Line = Y & 7;         
   byte BackdropColor = VDP[7] & 0x0F;
-  
-  // VDP[7] 디버깅
-  static bool debug2Printed = false;
-  if (!debug2Printed && Y == 0) {
-    Serial.print("SCREEN 2 - VDP[7] = 0x");
-    Serial.print(VDP[7], HEX);
-    Serial.print(" Backdrop=");
-    Serial.println(BackdropColor);
-    debug2Printed = true;
-  }
-
   for (int X = 0; X < 32; X++) {
     int CharCode = ChrTab[Row + X] + (Zone * 256);
     byte Pattern = ChrGen[CharCode * 8 + Line];
     byte Color   = ColTab[CharCode * 8 + Line];
-    
     byte FG = Color >> 4;   
     byte BG = Color & 0x0F; 
-
     if(FG == 0) FG = BackdropColor;
     if(BG == 0) BG = BackdropColor;
-
     for(int i=0; i<8; i++) {
       *P++ = (Pattern & 0x80) ? FG : BG;
       Pattern <<= 1;
@@ -600,7 +492,7 @@ void RefreshLine2(byte Y) {
   }
   DrawSprites(Y, XBuf + Y * MSX_WIDTH);
 }
-// 미구현 모드 안전장치 (화면 깨짐 방지)
+
 void ClearLine(byte Y) {
   if(!XBuf || Y >= MSX_HEIGHT) return;
   byte *P = XBuf + Y * MSX_WIDTH;
@@ -618,38 +510,21 @@ void RefreshLine8(byte Y) { ClearLine(Y); }
 void RefreshLine10(byte Y) { ClearLine(Y); }
 void RefreshLine12(byte Y) { ClearLine(Y); }
 
-
-
-
-void Keyboard(void) {
-  UpdateMSXKeyboard();
-}
-
+void Keyboard(void) { UpdateMSXKeyboard(); }
 unsigned int Joystick(void) {
-unsigned int status = 0xFFFF; 
+  unsigned int status = 0xFFFF; 
   fabgl::Keyboard *kb = PS2Controller.keyboard();
   if (!kb) return status;
-
-  // 조이스틱 매핑은 유지하되 키보드 매핑과 충돌하지 않게 주의
   if (kb->isVKDown(fabgl::VK_UP))    status &= ~0x0001; 
   if (kb->isVKDown(fabgl::VK_DOWN))  status &= ~0x0002; 
   if (kb->isVKDown(fabgl::VK_LEFT))  status &= ~0x0004; 
   if (kb->isVKDown(fabgl::VK_RIGHT)) status &= ~0x0008; 
-  
-  // 조이스틱 버튼 매핑 (기존 Space/M 대신 별도 키 할당 고려 가능)
-  // 여기서는 Space를 그대로 두지만, 키보드 타이핑 시 Space와 중복될 수 있음
-  // 게임 플레이 시에는 문제 없음
-  if (kb->isVKDown(fabgl::VK_SPACE)) status &= ~0x0010; // Button A
-  if (kb->isVKDown(fabgl::VK_M))     status &= ~0x0020; // Button B
-
+  if (kb->isVKDown(fabgl::VK_SPACE)) status &= ~0x0010; 
+  if (kb->isVKDown(fabgl::VK_M))     status &= ~0x0020; 
   return status;
 }
-
 unsigned int Mouse(byte N) { return 0; }
-
-void PutImage(void) {
-  RefreshScreen();
-}
+void PutImage(void) { RefreshScreen(); }
 
 // SD 카드 파일 I/O
 extern "C" {
@@ -657,7 +532,6 @@ extern "C" {
     if(!filename) return NULL;
     String path = String(filename);
     if(!path.startsWith("/")) path = "/" + path;
-    
     File tempFile = SD.open(path, FILE_READ);
     if(!tempFile) return NULL;
     File* fptr = new File(tempFile);
