@@ -3,7 +3,7 @@ MSX1 에뮬레이터입니다.
 
 ## 라이선스
 
-이 프로젝트는 LGPL License로 배포됩니다.  
+이 프로젝트는 CopyLeft License로 배포됩니다.  
 
 ![20251123_204752](https://github.com/user-attachments/assets/28af6e75-46cf-43c7-92d8-31af9791f5fb)
 ![20251123_175817](https://github.com/user-attachments/assets/d4221c03-125b-429e-9460-a3745c0b700d)
