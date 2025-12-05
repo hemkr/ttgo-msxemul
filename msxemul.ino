@@ -1,5 +1,5 @@
 /*
- * TTGO VGA32 MSX Emulator
+ * TTGO VGA32 MSX Emulator (Improved File Browser with Scrolling)
  * Based on fMSX by Marat Fayzullin and FabGL by Fabrizio Di Vittorio.
  */
 
@@ -7,6 +7,7 @@
 #include "MSX.h"
 #include <SPI.h>
 #include <SD.h>
+#include <vector> // 파일 목록 관리를 위해 vector 사용 (필요시)
 
 // [중요 수정] VGAController 대신 VGA16Controller를 사용해야 팔레트 제어가 가능합니다.
 // ESP32_Port.cpp의 extern 선언과 타입을 일치시킵니다.
@@ -49,7 +50,12 @@ bool emuRunning = false;
 #define SD_CLK  14
 #define SD_CS   13
 
+// 파일 브라우저 설정
+const int MAX_FILES = 200;      // 최대 파일 로드 개수 증가
+const int ITEMS_PER_PAGE = 25;  // 한 화면에 보여줄 항목 수
+
 void setup() {
+  setCpuFrequencyMhz(240);
   Serial.begin(115200);
   delay(1000);
 
@@ -79,6 +85,7 @@ void setup() {
   Canvas->clear();
   Canvas->setPenColor(Color::White);
   Canvas->drawText(10, 10, "MSX Emulator Starting...");
+  Canvas->waitCompletion(); // 화면 출력이 완료될 때까지 대기 (로딩 개선)
 
   // SD 카드 마운트
   Serial.println("Mounting SD card...");
@@ -88,6 +95,7 @@ void setup() {
     Serial.println("ERROR: SD Card Mount Failed!");
     Canvas->setPenColor(Color::Red);
     Canvas->drawText(10, 30, "SD Card Mount Failed!");
+    Canvas->waitCompletion(); // 화면 출력이 완료될 때까지 대기
     while(1) { delay(1000); }
   }
 
@@ -123,6 +131,7 @@ void setup() {
   // UI 및 초기화
   Canvas->clear();
   Canvas->drawText(10, 10, "MSX Emulator Ready");
+  Canvas->waitCompletion(); // 화면 출력이 완료될 때까지 대기
   
   delay(1000);
   runFileBrowser();
@@ -151,7 +160,7 @@ void loop() {
   delay(10);
 }
 
-// 파일 브라우저
+// 개선된 파일 브라우저 (스크롤 기능 + 키 반복 방지)
 void runFileBrowser() {
   File root = SD.open("/");
   if(!root) {
@@ -159,16 +168,17 @@ void runFileBrowser() {
     return;
   }
 
-  int selected = 0;
+  // 파일 목록 로딩
   int totalFiles = 0;
-  String files[50];
+  String files[MAX_FILES];
 
   File file = root.openNextFile();
-  while(file && totalFiles < 50) {
+  while(file && totalFiles < MAX_FILES) {
     String fname = String(file.name());
     if(fname.startsWith("/")) fname = fname.substring(1);
 
-    if(fname.endsWith(".ROM") || fname.endsWith(".rom")) {
+    // ROM 파일만 필터링
+    if(fname.endsWith(".ROM") || fname.endsWith(".rom") || fname.endsWith(".mx1") || fname.endsWith(".MX1")) {
       files[totalFiles] = fname;
       totalFiles++;
     }
@@ -183,75 +193,133 @@ void runFileBrowser() {
   bool selecting = true;
   bool redraw = true;
   fabgl::Keyboard *kb = PS2Controller.keyboard();
+  
+  // 전체 메뉴 항목 수 = 파일 수 + 1 (MSX BASIC 실행 메뉴)
   int totalItems = 1 + totalFiles;
+  
+  int selected = 0;       // 현재 선택된 커서 위치 (전체 목록 기준)
+  int topItem = 0;        // 화면 맨 위에 표시될 항목의 인덱스 (스크롤 오프셋)
+
+  // 키 반복 방지를 위한 변수
+  unsigned long lastKeyTime = 0;
+  const unsigned long KEY_DELAY = 150; // 키 입력 간격 (밀리초)
+  fabgl::VirtualKey lastKey = fabgl::VK_NONE;
 
   while(selecting) {
     if (redraw) {
       Canvas->setBrushColor(Color::Black);
       Canvas->clear();
 
-      Canvas->setPenColor(Color::White);
-      Canvas->drawText(10, 10, "Select Option (Up/Down/Enter):");
+      // 헤더 출력
+      Canvas->setPenColor(Color::Cyan);
+      Canvas->drawText(10, 10, "Select ROM (Up/Down/Enter):");
+      
+      Canvas->setPenColor(Color::BrightMagenta);
+      Canvas->drawLine(10, 25, 500, 25);
 
-      if(selected == 0) {
-        Canvas->setPenColor(Color::Yellow);
-        Canvas->drawText(10, 30, ">");
-      } else {
-        Canvas->setPenColor(Color::White);
-      }
-      Canvas->drawText(25, 30, "[ Run MSX BASIC ]");
+      // 리스트 출력 루프 (스크롤 적용)
+      for(int i = 0; i < ITEMS_PER_PAGE; i++) {
+        int itemIndex = topItem + i;
+        
+        if (itemIndex >= totalItems) break;
 
-      for(int i = 0; i < totalFiles && i < 20; i++) {
-        int menuIndex = i + 1;
-        int yPos = 30 + (menuIndex * 12);
+        int yPos = 35 + (i * 14);
 
-        if(menuIndex == selected) {
+        // 커서 표시
+        if(itemIndex == selected) {
           Canvas->setPenColor(Color::Yellow);
-          Canvas->drawText(10, yPos, ">");
-        } else {
+          Canvas->drawText(5, yPos, ">");
           Canvas->setPenColor(Color::White);
+        } else {
+          Canvas->setPenColor(Color::BrightMagenta); 
         }
-        Canvas->drawText(25, yPos, files[i].c_str());
+
+        // 메뉴 내용 출력
+        if (itemIndex == 0) {
+          Canvas->drawText(20, yPos, "[ Run MSX BASIC ]");
+        } else {
+          Canvas->drawText(20, yPos, files[itemIndex - 1].c_str());
+        }
       }
+      
+      // 페이지 정보 표시
+      Canvas->setPenColor(Color::BrightMagenta);
+      char pageInfo[32];
+      sprintf(pageInfo, "Item %d / %d", selected + 1, totalItems);
+      Canvas->drawText(400, 10, pageInfo);
+      
       redraw = false;
     }
 
     if(kb->virtualKeyAvailable()) {
       fabgl::VirtualKey key = kb->getNextVirtualKey();
+      unsigned long currentTime = millis();
 
-      if(key == fabgl::VK_UP && selected > 0) {
-        selected--;
-        redraw = true;
-      }
-      if(key == fabgl::VK_DOWN && selected < totalItems - 1) {
-        selected++;
-        redraw = true;
-      }
-      if(key == fabgl::VK_RETURN) {
-        if (selected == 0) {
-          Serial.println("Starting MSX BASIC...");
-          ROMName[0] = 0; 
-          ROMName[1] = 0; 
-          Canvas->clear();
-          Canvas->drawText(10, 10, "Booting MSX BASIC...");
-        } else {
-          int fileIdx = selected - 1;
-          Serial.printf("Loading ROM: %s\n", files[fileIdx].c_str());
-          static char fileNameBuffer[64];
-          String path = "/" + files[fileIdx];
-          strncpy(fileNameBuffer, path.c_str(), sizeof(fileNameBuffer)-1);
-          fileNameBuffer[sizeof(fileNameBuffer)-1] = '\0';
-          ROMName[0] = fileNameBuffer;
-          ROMName[1] = 0;
-          Canvas->clear();
-          Canvas->drawText(10, 10, "Loading ROM...");
-          Canvas->drawText(10, 30, files[fileIdx].c_str());
+      // 키 반복 방지: 같은 키가 너무 빨리 반복되지 않도록 체크
+      if (key != lastKey || (currentTime - lastKeyTime) >= KEY_DELAY) {
+        lastKey = key;
+        lastKeyTime = currentTime;
+
+        if(key == fabgl::VK_UP) {
+          if (selected > 0) {
+            selected--;
+            if (selected < topItem) {
+              topItem = selected;
+            }
+            redraw = true;
+          }
         }
-        delay(500);
-        emuRunning = true;
-        selecting = false;
+        
+        if(key == fabgl::VK_DOWN) {
+          if (selected < totalItems - 1) {
+            selected++;
+            if (selected >= topItem + ITEMS_PER_PAGE) {
+              topItem = selected - ITEMS_PER_PAGE + 1;
+            }
+            redraw = true;
+          }
+        }
+        
+        if(key == fabgl::VK_RETURN) {
+          if (selected == 0) {
+            Serial.println("Starting MSX BASIC...");
+            ROMName[0] = 0; 
+            ROMName[1] = 0; 
+            Canvas->clear();
+            Canvas->drawText(10, 10, "Booting MSX BASIC...");
+          } else {
+            int fileIdx = selected - 1;
+            Serial.printf("Loading ROM: %s\n", files[fileIdx].c_str());
+            static char fileNameBuffer[64];
+            String path = "/" + files[fileIdx];
+            strncpy(fileNameBuffer, path.c_str(), sizeof(fileNameBuffer)-1);
+            fileNameBuffer[sizeof(fileNameBuffer)-1] = '\0';
+            ROMName[0] = fileNameBuffer;
+            ROMName[1] = 0;
+            Canvas->clear();
+            Canvas->drawText(10, 10, "Loading ROM...");
+            Canvas->drawText(10, 30, files[fileIdx].c_str());
+          }
+          delay(500);
+          emuRunning = true;
+          selecting = false;
+        }
+        
+        // Page Up/Down 기능
+        if (key == fabgl::VK_PAGEUP) {
+          selected -= ITEMS_PER_PAGE;
+          if (selected < 0) selected = 0;
+          if (selected < topItem) topItem = selected;
+          redraw = true;
+        }
+        if (key == fabgl::VK_PAGEDOWN) {
+          selected += ITEMS_PER_PAGE;
+          if (selected >= totalItems) selected = totalItems - 1;
+          if (selected >= topItem + ITEMS_PER_PAGE) topItem = selected - ITEMS_PER_PAGE + 1;
+          redraw = true;
+        }
       }
     }
-    delay(20);
+    delay(10);
   }
 }
